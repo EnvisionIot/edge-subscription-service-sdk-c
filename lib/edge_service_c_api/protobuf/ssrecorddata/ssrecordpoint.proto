@@ -1,0 +1,34 @@
+syntax = "proto2";
+package ssrecorddata;
+
+option java_package = "com.protobuf.generated";
+option java_outer_classname = "SSRecordData";
+option java_multiple_files = false;
+
+message SSRecordPoint
+{
+  required string orgId = 1;
+  required string modelId = 2; 
+  required string assetId = 3;
+  required string collectDeviceId = 4;
+  required string pointId = 5;
+  required int64 time = 6;
+  required string value = 7;
+  required int32 quality = 8;
+  required int64 dq = 9;
+  required string modelPath = 10;
+  required string policyType = 11;
+  required string signalType = 12;
+  required bool hasQuality = 13;
+  required string dataType = 14;
+  required string subDataType = 15;
+  optional string attr = 16;
+  optional int32 usingOem = 17;
+  optional int64 oemTime = 18;
+  optional int32 pointType = 19;
+}
+
+message SSRecordPoints
+{
+    repeated SSRecordPoint points = 1;
+}

@@ -1,0 +1,36 @@
+syntax = "proto2";
+package controlresponsedata;
+
+option java_package = "com.protobuf.generated";
+option java_outer_classname = "ControlResponseData";
+option java_multiple_files = false;
+
+message ControlResponsePoint
+{
+  required string requestId = 1;
+  required string messageId = 2; 
+  required string requestMethod = 3;
+  required string callType = 4;
+  required string controlChannelId = 5;
+  required string productKey = 6;
+  required string deviceKey = 7;
+  required string assetId = 8;
+  required string serviceName = 9;
+  required string serviceId = 10;
+  required string callbackUrl = 11;
+  required string inputData = 12;
+  required string outputData = 13;
+  required int64 status = 14;
+  required string msg = 15;
+  required string submsg = 16;
+  required int64 timeout = 17;
+  required int64 gmtServiceRequest = 18;
+  required int64 gmtServiceReply = 19;
+  required int64 gmtDeviceReply = 20;
+  optional string attr = 21;
+}
+
+message ControlResponsePoints
+{
+    repeated ControlResponsePoint points = 1;
+}

@@ -1,0 +1,32 @@
+syntax = "proto2";
+package setmeasurepointresponsedata;
+
+option java_package = "com.protobuf.generated";
+option java_outer_classname = "SetMeasurepointResponseData";
+option java_multiple_files = false;
+
+message SetMeasurepointResponsePoint
+{
+  required string requestId = 1;
+  required string orgId = 2; 
+  required string callType = 3;
+  required string setMeasurepointChannelId = 4;
+  required string productKey = 5;
+  required string deviceKey = 6;
+  required string assetId = 7;
+  required string measurepointId = 8;
+  required string callbackUrl = 9;
+  required string inputData = 10;
+  required int64 status = 11;
+  required string msg = 12;
+  required string submsg = 13;
+  required int64 timeout = 14;
+  required int64 gmtSetMeasurepointRequest = 15;
+  required int64 gmtSetMeasurepointReply = 16;
+  optional string attr = 17;
+}
+
+message SetMeasurepointResponsePoints
+{
+    repeated SetMeasurepointResponsePoint points = 1;
+}
