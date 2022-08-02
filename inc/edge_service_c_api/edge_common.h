@@ -91,13 +91,18 @@ enum EDGE_LOG_LEVEL {
 #define EDGE_PORT_FLAG 8000
 
 //创建ctx时，nsq的port<EDGE_PORT_FLAG时，使用EDGE_HA_PORT_OLD，nsq的port>=EDGE_PORT_FLAG时，使用EDGE_HA_PORT
-#define EDGE_HA_PORT 8000
+#define EDGE_HA_PORT 8003
 #define EDGE_HA_PORT_OLD 58000
 #define EDGE_SERVICE_CHECK_URL "ping"
 
 //检查edge消息队列服务是否可用的port，这里定义的这个值不再使用，强制是创建ctx时，nsq的port+1
 //#define EDGE_SERVICE_CHECK_PORT 9151
 #define EDGE_DATASERVICE_DEFAULT_PORT 9150
+
+//内部调用外部curl接口时，默认超时时间，单位：秒
+#define EDGE_CURL_DEFAULT_TIMEOUT_SEC 10
+//内部初始化阶段调用外部curl接口时，默认超时时间，单位：秒
+#define EDGE_CURL_INIT_TIMEOUT_SEC 2
 
 struct EDGE_SERVICE_C_API_DLL_EXPORT CommonStr {
     char str[256];
@@ -182,6 +187,9 @@ EDGE_SERVICE_C_API_DLL_EXPORT extern int edge_sleep(long long int ms);
 EDGE_SERVICE_C_API_DLL_EXPORT extern int init_edge_service_ctx();
 
 EDGE_SERVICE_C_API_DLL_EXPORT extern int uninit_edge_service_ctx();
+
+EDGE_SERVICE_C_API_DLL_EXPORT extern struct IPBox *
+get_current_master_ip_list_timeout(struct IPBox *ip_box, int ha_port, int timeout_sec);
 
 EDGE_SERVICE_C_API_DLL_EXPORT extern struct IPBox *get_current_master_ip_list(struct IPBox *ip_box, int ha_port);
 

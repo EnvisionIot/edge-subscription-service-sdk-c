@@ -52,7 +52,8 @@ extern "C"
 #define EDGE_DATASERVICE_DEFAULT_TCP_KEEPIDLE 10//tcp keepalive空闲时间
 #define EDGE_DATASERVICE_DEFAULT_TCP_KEEPINTVL 4//tcp keepalive间隔时间
 #define EDGE_DATASERVICE_DEFAULT_TCP_KEEPCNT 3//tcp keepalive探测次数
-#define EDGE_DATASERVICE_TCP_CONNECT_TIMEOUT_MS 8000 //单位毫秒，tcp连接超时时间
+#define EDGE_DATASERVICE_TCP_CONNECT_DEFAULT_TIMEOUT_MS 8000 //单位毫秒，tcp连接超时时间
+#define EDGE_DATASERVICE_TCP_CONNECT_INIT_TIMEOUT_MS 2000 //单位毫秒，tcp连接超时时间
 #define EDGE_DATASERVICE_MAX_NORMAL_SEND_TIMEOUT_MS 60000 //单位毫秒，normal send时最大超时时间
 #define EDGE_DATASERVICE_BUF_SMALL_SIZE 8192 //一次recv/send调用所用buf大小
 #define EDGE_DATASERVICE_BUF_BIG_SIZE 1024*1024 //一次完整交互消息所用buf最大大小
@@ -74,7 +75,8 @@ enum EDGE_SERVICE_C_API_DLL_EXPORT TOPIC_TYPE {
     TOPIC_TYPE_DATA_SUBSCRIBE_ALL,
     TOPIC_TYPE_CONTROL_RESPONSE,
     TOPIC_TYPE_SET_MEASUREPOINT_RESPONSE,
-    TOPIC_TYPE_CUSTOM
+    TOPIC_TYPE_CUSTOM,
+    TOPIC_TYPE_SIMPLE_DATA_SUBSCRIBE,
 };
 
 enum EDGE_SERVICE_C_API_DLL_EXPORT SUBSCRIBE_MODE {
@@ -94,6 +96,8 @@ enum EDGE_SERVICE_C_API_DLL_EXPORT RUNNING_STATUS {
 
 enum EDGE_SERVICE_C_API_DLL_EXPORT NSQ_INIT_STATUS {
     NSQ_INIT_STATUS_NOTHING = 0,
+    NSQ_INIT_STATUS_WAIT_AUTH_RESPONSE,
+    NSQ_INIT_STATUS_AUTH_SUCCESS,
     NSQ_INIT_STATUS_WAIT_SUB_RESPONSE,
     NSQ_INIT_STATUS_SUB_SUCCESS,
     NSQ_INIT_STATUS_INIT_SUCCESS
@@ -163,6 +167,25 @@ struct EDGE_SERVICE_C_API_DLL_EXPORT DataSubscribeSubStruct {
 struct DataSubscribeStruct {
     int point_count;
     struct DataSubscribeSubStruct *points;
+};
+
+struct EDGE_SERVICE_C_API_DLL_EXPORT SimpleDataSubscribeSubStruct {
+    char *assetid;
+    char *pointid;
+    int64_t time;
+    char *value;
+    int32_t quality;
+    int32_t edq;
+    char *datatype;
+    char *subdatatype;
+    int64_t oemtime;
+    char *attr;
+};
+
+//订阅点信息结构
+struct SimpleDataSubscribeStruct {
+    int point_count;
+    struct SimpleDataSubscribeSubStruct *points;
 };
 
 struct EDGE_SERVICE_C_API_DLL_EXPORT ControlResponseSubStruct {
@@ -299,6 +322,7 @@ struct EDGE_SERVICE_C_API_DLL_EXPORT DataServiceCtx {
     //输入的信息-->
     struct IPBox *ip_box;
     int port;
+    char p[256];
     char accessKey[256];
     char secretKey[256];
     char channel_id[256];
@@ -375,7 +399,7 @@ struct EDGE_SERVICE_C_API_DLL_EXPORT DataServiceCtx {
 };
 
 /************************************************************
- * name:new_data_service_ctx
+ * name:new_data_service_ctx（建议用new_data_service_ctx_en代替，因为这个函数不支持登录校验）
  * desc:初始化连接及订阅（只用于订阅），初始化必要的上下文，线程安全，注意当只填一个IP时，无论这个IP是主还是备，都会去向这个IP订阅数据，填多个IP时，会根据主备情况自动切换
  *
  * para:[in] ip_list              一组服务端的IP地址，可以是一个或多个，不能为NULL，注意当只填一个IP时，无论这个IP是主还是备，都会去向这个IP订阅数据，填多个IP时，会根据主备情况自动切换
@@ -414,7 +438,48 @@ new_data_service_ctx(struct IPBox *ip_list, int port, char *accessKey, char *sec
                                           struct DataServiceMessage *msg, void *user_ctx));
 
 /************************************************************
- * name:new_data_service_ctx_for_publish
+ * name:new_data_service_ctx_en
+ * desc:初始化连接及订阅（只用于订阅），初始化必要的上下文，线程安全，注意当只填一个IP时，无论这个IP是主还是备，都会去向这个IP订阅数据，填多个IP时，会根据主备情况自动切换
+ *      相比于new_data_service_ctx，增加了对用户名密码的支持
+ *
+ * para:[in] ip_list              一组服务端的IP地址，可以是一个或多个，不能为NULL，注意当只填一个IP时，无论这个IP是主还是备，都会去向这个IP订阅数据，填多个IP时，会根据主备情况自动切换
+ *      [in] port                 服务端端口(0<port<65536)
+ *      [in] p                    服务端密码，填NULL或空串时，表示没有密码
+ *      [in] accessKey            app的accessKey，目前没用，随便填一个，不能为NULL
+ *      [in] secretKey            app的secretKey，目前没用，随便填一个，不能为NULL
+ *      [in] channel_id           订阅id，subscribeGroupId或controlChannelId或setMeasurepointChannelId，长度<=60字节，不能为NULL
+ *      [in] consumerGroup        消费组id，同一个消费组且订阅了同一个channel_id的订阅者，同一个数据只能一个人收到，如果为NULL，将会使用默认组
+ *      [in] topic_type           channel_id的类型，subscribeGroupId填TOPIC_TYPE_DATA_SUBSCRIBE，controlChannelId填TOPIC_TYPE_CONTROL_RESPONSE，
+ *                                setMeasurepointChannelId填TOPIC_TYPE_SET_MEASUREPOINT_RESPONSE，或者填TOPIC_TYPE_AUTO，程序自动判别
+ *      [in] need_auto_reconnect  是否自动重连，目前无论填什么都会自动重连
+ *      [in] user_ctx             回调函数中用户自定义指针
+ *      [in] connect_callback     连接成功回调
+ *                                [in] work_ctx     不用关注这个，调试用，不要试图使用里面的任何值
+ *                                [in] channel_id   标识是哪个订阅通道连接成功触发的回调
+ *                                [in] user_ctx     用户自定义指针
+ *      [in] close_callback       断开连接回调
+ *                                [in] work_ctx     不用关注这个，调试用，不要试图使用里面的任何值
+ *                                [in] channel_id   标识是哪个订阅通道断开触发的回调
+ *                                [in] user_ctx     用户自定义指针
+ *      [in] msg_callback         消息回调
+ *                                [in] work_ctx     不用关注这个，调试用，不要试图使用里面的任何值
+ *                                [in] channel_id   标识是哪个订阅通道消息触发的回调
+ *                                [in] msg          具体的消息，注意用完后要调用delete_data_service_msg释放内存
+ *                                [in] user_ctx     用户自定义指针
+ * return:0         success
+ *        <0        fail
+ * tips:
+ ************************************************************/
+EDGE_SERVICE_C_API_DLL_EXPORT extern struct DataServiceCtx *
+new_data_service_ctx_en(struct IPBox *ip_list, int port, char *p, char *accessKey, char *secretKey, char *channel_id,
+                        char *consumerGroup, int topic_type, int need_auto_reconnect, void *user_ctx,
+                        void (*connect_callback)(void *work_ctx, char *channel_id, void *user_ctx),
+                        void (*close_callback)(void *work_ctx, char *channel_id, void *user_ctx),
+                        void (*msg_callback)(void *work_ctx, char *channel_id,
+                                             struct DataServiceMessage *msg, void *user_ctx));
+
+/************************************************************
+ * name:new_data_service_ctx_for_publish（建议用new_data_service_ctx_en_for_publish代替，因为这个函数不支持登录校验）
  * desc:初始化连接（只用于发送），初始化必要的上下文，线程安全，注意当只填一个IP时，无论这个IP是主还是备，都会去连接这个IP，填多个IP时，会根据主备情况自动切换
  *
  * para:[in] ip_list              一组服务端的IP地址，可以是一个或多个，不能为NULL，注意当只填一个IP时，无论这个IP是主还是备，都会去连接这个IP，填多个IP时，会根据主备情况自动切换
@@ -438,6 +503,37 @@ new_data_service_ctx(struct IPBox *ip_list, int port, char *accessKey, char *sec
  ************************************************************/
 EDGE_SERVICE_C_API_DLL_EXPORT extern struct DataServiceCtx *
 new_data_service_ctx_for_publish(struct IPBox *ip_list, int port, char *accessKey, char *secretKey,
+                                 int need_auto_reconnect, int is_fast, void *user_ctx,
+                                 void (*connect_callback)(void *work_ctx, char *channel_id, void *user_ctx),
+                                 void (*close_callback)(void *work_ctx, char *channel_id, void *user_ctx));
+
+/************************************************************
+ * name:new_data_service_ctx_en_for_publish
+ * desc:初始化连接（只用于发送），初始化必要的上下文，线程安全，注意当只填一个IP时，无论这个IP是主还是备，都会去连接这个IP，填多个IP时，会根据主备情况自动切换
+ *      相比于new_data_service_ctx_for_publish，增加了对用户名密码的支持
+ *
+ * para:[in] ip_list              一组服务端的IP地址，可以是一个或多个，不能为NULL，注意当只填一个IP时，无论这个IP是主还是备，都会去连接这个IP，填多个IP时，会根据主备情况自动切换
+ *      [in] port                 服务端端口(0<port<65536)
+ *      [in] p                    服务端密码，填NULL或空串时，表示没有密码
+ *      [in] accessKey            app的accessKey，目前没用，随便填一个，不能为NULL
+ *      [in] secretKey            app的secretKey，目前没用，随便填一个，不能为NULL
+ *      [in] need_auto_reconnect  是否自动重连，目前无论填什么都会自动重连
+ *      [in] is_fast              是否使用快速发送模式，0：普通模式，其他值：快速模式，快速模式发送后不会接收反较
+ *      [in] user_ctx             回调函数中用户自定义指针
+ *      [in] connect_callback     连接成功回调
+ *                                [in] work_ctx     不用关注这个，调试用，不要试图使用里面的任何值
+ *                                [in] channel_id   标识是哪个订阅通道连接成功触发的回调(总是为空串"")
+ *                                [in] user_ctx     用户自定义指针
+ *      [in] close_callback       断开连接回调
+ *                                [in] work_ctx     不用关注这个，调试用，不要试图使用里面的任何值
+ *                                [in] channel_id   标识是哪个订阅通道断开触发的回调(总是为空串"")
+ *                                [in] user_ctx     用户自定义指针
+ * return:0         success
+ *        <0        fail
+ * tips:
+ ************************************************************/
+EDGE_SERVICE_C_API_DLL_EXPORT extern struct DataServiceCtx *
+new_data_service_ctx_en_for_publish(struct IPBox *ip_list, int port, char *p, char *accessKey, char *secretKey,
                                  int need_auto_reconnect, int is_fast, void *user_ctx,
                                  void (*connect_callback)(void *work_ctx, char *channel_id, void *user_ctx),
                                  void (*close_callback)(void *work_ctx, char *channel_id, void *user_ctx));

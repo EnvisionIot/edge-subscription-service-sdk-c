@@ -672,7 +672,7 @@ extern void set_log_writer(void (*log_writer)(struct LogInfoBox *log_info, void 
     pthread_rwlock_unlock(&(edge_current_log_config->op_rwlock));
 }
 
-extern struct IPBox *get_current_master_ip_list(struct IPBox *ip_box, int ha_port) {
+extern struct IPBox *get_current_master_ip_list_timeout(struct IPBox *ip_box, int ha_port, int timeout_sec) {
     if (ip_box == NULL || ip_box->count <= 0) {
         return NULL;
     }
@@ -684,7 +684,7 @@ extern struct IPBox *get_current_master_ip_list(struct IPBox *ip_box, int ha_por
     for (ii = 0; ii < ip_box->count; ii++) {
         memset(request_url, 0, sizeof(request_url));
         snprintf(request_url, sizeof(request_url), "%s:%d/%s", ip_box->ip_list[ii].str, ha_port, EDGE_HA_URL);
-        ret = get_url_syn(&response, request_url, 10);
+        ret = get_url_syn(&response, request_url, timeout_sec);
         if (ret < 0 || response == NULL) {
             char log_content[1024];
             memset(log_content, 0, sizeof(log_content));
@@ -745,6 +745,10 @@ extern struct IPBox *get_current_master_ip_list(struct IPBox *ip_box, int ha_por
     return NULL;
 }
 
+extern struct IPBox *get_current_master_ip_list(struct IPBox *ip_box, int ha_port) {
+    return get_current_master_ip_list_timeout(ip_box, ha_port, EDGE_CURL_DEFAULT_TIMEOUT_SEC);
+}
+
 extern int check_service_available(char *ip, int port) {
     if (ip == NULL || strlen(ip) <= 0) {
         return -1;
@@ -755,7 +759,7 @@ extern int check_service_available(char *ip, int port) {
 
     memset(request_url, 0, sizeof(request_url));
     snprintf(request_url, sizeof(request_url), "%s:%d/%s", ip, port, EDGE_SERVICE_CHECK_URL);
-    ret = get_url_syn(&response, request_url, 10);
+    ret = get_url_syn(&response, request_url, EDGE_CURL_DEFAULT_TIMEOUT_SEC);
     if (ret < 0 || response == NULL) {
         char log_content[1024];
         memset(log_content, 0, sizeof(log_content));

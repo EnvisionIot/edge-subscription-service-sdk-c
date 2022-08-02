@@ -109,6 +109,7 @@ msg_callback(void *work_ctx, char *channel_id, struct DataServiceMessage *msg, v
     struct DataSubscribeStruct *sub_p = NULL;
     struct ControlResponseStruct *control_p = NULL;
     struct SetMeasurepointResponseStruct *set_p = NULL;
+    struct SimpleDataSubscribeStruct *ssub_p = NULL;
 //    char *custom_ptr = NULL;
 
     switch (msg->topic_type) {
@@ -134,6 +135,13 @@ msg_callback(void *work_ctx, char *channel_id, struct DataServiceMessage *msg, v
             x->point_count_all += set_p->point_count;
             pthread_rwlock_unlock(&(x->op_rwlock));
             break;
+        case TOPIC_TYPE_SIMPLE_DATA_SUBSCRIBE:
+            ssub_p = ((struct SimpleDataSubscribeStruct *) (msg->msg));
+            pthread_rwlock_wrlock(&(x->op_rwlock));
+            x->point_count += ssub_p->point_count;
+            x->point_count_all += ssub_p->point_count;
+            pthread_rwlock_unlock(&(x->op_rwlock));
+            break;
         case TOPIC_TYPE_CUSTOM:
 //            custom_ptr = (char *) (msg->msg);
             break;
@@ -149,13 +157,14 @@ msg_callback(void *work_ctx, char *channel_id, struct DataServiceMessage *msg, v
 }
 
 static void print_help(char *name) {
-    printf("usage:<%s> <-topic topic_name> [-topic_type 0] [-port 9150] <-ip 1.1.1.1 2.2.2.2 ...>\n", name);
+    printf("usage:<%s> <-topic topic_name> [-topic_type 0] [-port 9150] [-p 123456] <-ip 1.1.1.1 2.2.2.2 ...>\n", name);
     printf("-topic_type 0 ====> TOPIC_TYPE_AUTO(default)\n");
     printf("-topic_type 1 ====> TOPIC_TYPE_DATA_SUBSCRIBE\n");
     printf("-topic_type 2 ====> TOPIC_TYPE_DATA_SUBSCRIBE_ALL\n");
     printf("-topic_type 3 ====> TOPIC_TYPE_CONTROL_RESPONSE\n");
     printf("-topic_type 4 ====> TOPIC_TYPE_SET_MEASUREPOINT_RESPONSE\n");
     printf("-topic_type 5 ====> TOPIC_TYPE_CUSTOM\n");
+    printf("-topic_type 6 ====> TOPIC_TYPE_SIMPLE_DATA_SUBSCRIBE\n");
     printf("port default value is 9150\n");
 }
 
@@ -171,17 +180,21 @@ int main(int argc, char *argv[]) {
     int ip_flag = 0;
     int topic_type_flag = 0;
     int port_flag = 0;
+    int p_flag = 0;
     struct IPBox *ip_list = NULL;
     char topic_name[128];
     memset(topic_name, 0, sizeof(topic_name));
     int topic_type = TOPIC_TYPE_AUTO;
     int port = EDGE_DATASERVICE_DEFAULT_PORT;
+    char p[64];
+    memset(p, 0, sizeof(p));
     for (ii = 1; ii < argc; ii++) {
         if (strcmp(argv[ii], "-ip") == 0) {
             topic_flag = 0;
             topic_type_flag = 0;
             port_flag = 0;
             ip_flag = 1;
+            p_flag = 0;
             continue;
         }
 
@@ -190,6 +203,7 @@ int main(int argc, char *argv[]) {
             topic_type_flag = 1;
             port_flag = 0;
             ip_flag = 0;
+            p_flag = 0;
             continue;
         }
 
@@ -198,6 +212,7 @@ int main(int argc, char *argv[]) {
             topic_type_flag = 0;
             port_flag = 0;
             ip_flag = 0;
+            p_flag = 0;
             continue;
         }
 
@@ -206,6 +221,16 @@ int main(int argc, char *argv[]) {
             topic_type_flag = 0;
             port_flag = 1;
             ip_flag = 0;
+            p_flag = 0;
+            continue;
+        }
+
+        if (strcmp(argv[ii], "-p") == 0) {
+            topic_flag = 0;
+            topic_type_flag = 0;
+            port_flag = 0;
+            ip_flag = 0;
+            p_flag = 1;
             continue;
         }
 
@@ -226,6 +251,11 @@ int main(int argc, char *argv[]) {
 
         if (port_flag == 1) {
             sscanf(argv[ii], "%d", &port);
+            continue;
+        }
+
+        if (p_flag == 1) {
+            snprintf(p, sizeof(p), "%s", argv[ii]);
             continue;
         }
     }
@@ -263,9 +293,10 @@ int main(int argc, char *argv[]) {
     //初始化锁
     pthread_rwlock_init(&(user_ctx->op_rwlock), NULL);
 
-    ctx = new_data_service_ctx(
+    ctx = new_data_service_ctx_en(
             ip_list,
             port,
+            p,
             "aaa",
             "bbb",
             topic_name,
@@ -279,7 +310,7 @@ int main(int argc, char *argv[]) {
     );
 
     if (ctx == NULL) {
-        printf("[DATASERVICE_TEST]:new_data_service_ctx error(file=%s, function=%s, line=%d)\n",
+        printf("[DATASERVICE_TEST]:new_data_service_ctx_en error(file=%s, function=%s, line=%d)\n",
                __FILE__, __FUNCTION__, __LINE__);
         delete_ip_box(ip_list);
         ip_list = NULL;

@@ -123,10 +123,10 @@ msg_callback(void *work_ctx, char *channel_id, struct DataServiceMessage *msg, v
 //1.init_edge_service_ctx;初始化全局变量，非线程安全
 //2.set_log_level(EDGE_LOG_INFO);设置日志等级，不设置默认为EDGE_LOG_INFO，线程安全，可以随时调用这个函数，实时生效
 //3.set_log_writer(my_log_writer, user_ctx);设置打印函数，sdk内部需要打印时会调用这个打印函数打印，如果不设置，默认打印到命令行终端，打印函数中注意数据用完后需要delete_log_info_box释放，非线程安全，一开始设置一次就可以了
-//4.调用new_data_service_ctx函数，初始化必要的上下文，线程安全，注意当只填一个IP时，无论这个IP是主还是备，都会去向这个IP订阅数据，填多个IP时，会根据主备情况自动切换
+//4.调用new_data_service_ctx_en函数，初始化必要的上下文，线程安全，注意当只填一个IP时，无论这个IP是主还是备，都会去向这个IP订阅数据，填多个IP时，会根据主备情况自动切换
 //5.调用data_service_ctx_start函数，启动相关模块，开始从服务端接收数据，非线程安全
 //6.可以调用data_service_ctx_stop函数暂停接收数据，start和stop的调用要成对，不能在没有调用start的情况下调用stop，也不能再已经start的情况下调用start，非线程安全
-//7.delete_data_service_ctx;释放new_data_service_ctx占用的资源，退出时需要调用，需要在调用stop之后调用该函数，非线程安全
+//7.delete_data_service_ctx;释放new_data_service_ctx_en占用的资源，退出时需要调用，需要在调用stop之后调用该函数，非线程安全
 //8.uninit_edge_service_ctx;释放init_edge_service_ctx占用的资源，退出时需要调用，需要在调用delete_data_service_ctx之后调用该函数，非线程安全
 //<--sdk使用流程
 int main(int argc, char *argv[]) {
@@ -136,6 +136,8 @@ int main(int argc, char *argv[]) {
     memset(topic_name, 0, sizeof(topic_name));
     char consumerGroup[60];
     memset(consumerGroup, 0, sizeof(consumerGroup));
+    char p[64];
+    memset(p, 0, sizeof(p));
 
     //需要连接的ip
     ip_list = add_ip_to_ip_box(ip_list, "127.0.0.1");
@@ -143,6 +145,8 @@ int main(int argc, char *argv[]) {
     int topic_type = TOPIC_TYPE_CONTROL_RESPONSE;
     //端口
     int port = EDGE_DATASERVICE_DEFAULT_PORT;
+    //登录密码，不需要登录密码时，可以是NULL或空串
+    snprintf(p, sizeof(p), "%s", "123456");
     //topic名字，控制反较数据订阅的topic都是以DATASVC.CONTROL.开头
     snprintf(topic_name, sizeof(topic_name), "%s", "DATASVC.CONTROL.APP.SUBTEST");
     //consumerGroup，非必填，如果consumerGroup是NULL，则默认为default，详细说明参考new_data_service_ctx函数注释
@@ -176,10 +180,11 @@ int main(int argc, char *argv[]) {
     //3.set_log_writer(my_log_writer, user_ctx);设置打印函数，sdk内部需要打印时会调用这个打印函数打印，如果不设置，默认打印到命令行终端，打印函数中注意数据用完后需要delete_log_info_box释放，非线程安全，一开始设置一次就可以了
     set_log_writer(my_log_writer, user_ctx);
 
-    //4.调用new_data_service_ctx函数，初始化必要的上下文，线程安全，注意当只填一个IP时，无论这个IP是主还是备，都会去向这个IP订阅数据，填多个IP时，会根据主备情况自动切换
-    ctx = new_data_service_ctx(
+    //4.调用new_data_service_ctx_en函数，初始化必要的上下文，线程安全，注意当只填一个IP时，无论这个IP是主还是备，都会去向这个IP订阅数据，填多个IP时，会根据主备情况自动切换
+    ctx = new_data_service_ctx_en(
             ip_list,
             port,
+            p,
             "your accessKey",
             "your secretKey",
             topic_name,
@@ -193,7 +198,7 @@ int main(int argc, char *argv[]) {
     );
 
     if (ctx == NULL) {
-        printf("[DATASERVICE_TEST]:new_data_service_ctx error(file=%s, function=%s, line=%d)\n", __FILE__, __FUNCTION__,
+        printf("[DATASERVICE_TEST]:new_data_service_ctx_en error(file=%s, function=%s, line=%d)\n", __FILE__, __FUNCTION__,
                __LINE__);
         delete_ip_box(ip_list);
         ip_list = NULL;
@@ -228,7 +233,7 @@ int main(int argc, char *argv[]) {
 
     //6.可以调用data_service_ctx_stop函数暂停接收数据，start和stop的调用要成对，不能在没有调用start的情况下调用stop，也不能再已经start的情况下调用start，非线程安全
     data_service_ctx_stop(ctx);
-    //7.delete_data_service_ctx;释放new_data_service_ctx占用的资源，退出时需要调用，需要在调用stop之后调用该函数，非线程安全
+    //7.delete_data_service_ctx;释放new_data_service_ctx_en占用的资源，退出时需要调用，需要在调用stop之后调用该函数，非线程安全
     delete_data_service_ctx(ctx);
     //8.uninit_edge_service_ctx;释放init_edge_service_ctx占用的资源，退出时需要调用，需要在调用delete_data_service_ctx之后调用该函数，非线程安全
     uninit_edge_service_ctx();

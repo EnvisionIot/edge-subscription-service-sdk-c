@@ -23,6 +23,7 @@
 #include "protobuf/controlresponsedata/controlresponsepoint.pb-c.h"
 #include "protobuf/ssrecorddata/ssrecordpoint.pb-c.h"
 #include "protobuf/setmeasurepointresponsedata/setmeasurepointresponsepoint.pb-c.h"
+#include "protobuf/subdata/subdata.pb-c.h"
 
 //字节序相关-->
 #define MY_NET_IS_BIGENDIAN 1//采用的网络字节序,0:小端,1:大端
@@ -154,9 +155,11 @@ static const int MY_Endian_Static = 0x01000002;
 //<--字节序相关
 
 //static函数声明-->
+//与服务端建立TCP连接，带超时时间，返回连接后的fd，失败时返回<0
+static int connect_server_timeout(char *server_ip, unsigned short server_port, int timeout_ms);
+
 //与服务端建立TCP连接，返回连接后的fd，失败时返回<0
-static int
-connect_server(char *server_ip, unsigned short server_port);
+static int connect_server(char *server_ip, unsigned short server_port);
 
 //用加锁的方式获取当前需要连接的IP
 static int get_ip_used_withlock(struct DataServiceCtx *ctx, char *ip_ret, int ip_ret_max);
@@ -219,6 +222,12 @@ static int transform_SSRecordPoint_to_DataSubscribeSubStruct(Ssrecorddata__SSRec
 static struct DataSubscribeStruct *
 transform_SSRecordPoints_to_DataSubscribeStruct(Ssrecorddata__SSRecordPoints *ssrps);
 
+static int transform_SubPoint_to_SimpleDataSubscribeSubStruct(Subdata__SubPoint *src,
+                                                              struct SimpleDataSubscribeSubStruct *dst);
+
+static struct SimpleDataSubscribeStruct *
+transform_SubPoints_to_SimpleDataSubscribeStruct(Subdata__SubPoints *subps);
+
 static int transform_ControlResponsePoint_to_ControlResponseSubStruct(Controlresponsedata__ControlResponsePoint *src,
                                                                       struct ControlResponseSubStruct *dst);
 
@@ -274,6 +283,12 @@ static int ctx_deal_message_msg(struct DataServiceCtx *ctx, struct nsq_packet_he
 //期望接收一帧nsq的OK反较
 static int expect_recv_ok_frame(int sock, int timeout_ms);
 
+//期望接收一帧nsq的auth正确反较
+static int expect_recv_auth_ok_frame(int sock, int timeout_ms);
+
+//期望接收一帧nsq的指定反较
+static int expect_recv_specified_frame(int sock, char *expect_in, int expect_in_len, int timeout_ms);
+
 //重连函数
 static int ctx_reconnect(struct DataServiceCtx *ctx);
 
@@ -295,6 +310,9 @@ static int ctx_tcp_send_data_and_wait_recv(int sock, char *send_buf, int send_le
 
 //发送magic code
 static int ctx_send_magic(int sock);
+
+//发送auth信息
+static int ctx_send_auth(int sock, char *p);
 
 //关闭心跳
 static int ctx_close_heartbeat(int sock);
@@ -320,7 +338,7 @@ static int ctx_stop_for_send_normal(struct DataServiceCtx *ctx);
 //<--static函数声明
 
 //static函数定义-->
-static int connect_server(char *server_ip, unsigned short server_port) {
+static int connect_server_timeout(char *server_ip, unsigned short server_port, int timeout_ms) {
     int ret = 0;
     int flag = 0;
     int optval = 1;
@@ -405,7 +423,7 @@ static int connect_server(char *server_ip, unsigned short server_port) {
 
     FD_ZERO(&wset);
     FD_SET(tcp_sock_fd, &wset);
-    tval.tv_sec = EDGE_DATASERVICE_TCP_CONNECT_TIMEOUT_MS / 1000;
+    tval.tv_sec = timeout_ms / 1000;
     tval.tv_usec = 0;
 
     ret = select(tcp_sock_fd + 1, NULL, &wset, NULL, &tval);
@@ -474,6 +492,10 @@ static int connect_server(char *server_ip, unsigned short server_port) {
              server_port);
     edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO, log_content);
     return tcp_sock_fd;
+}
+
+static int connect_server(char *server_ip, unsigned short server_port) {
+    return connect_server_timeout(server_ip, server_port, EDGE_DATASERVICE_TCP_CONNECT_DEFAULT_TIMEOUT_MS);
 }
 
 static int get_ip_used_withlock(struct DataServiceCtx *ctx, char *ip_ret, int ip_ret_max) {
@@ -756,10 +778,12 @@ static void *decode_msg(char *src_msg, int src_msg_len, int topic_type) {
     Ssrecorddata__SSRecordPoints *ssrps_ptr = NULL;
     Controlresponsedata__ControlResponsePoints *crps_ptr = NULL;
     Setmeasurepointresponsedata__SetMeasurepointResponsePoints *smrps_ptr = NULL;
+    Subdata__SubPoints *subps_ptr = NULL;
 
     struct DataSubscribeStruct *dss_ptr = NULL;
     struct ControlResponseStruct *crs_ptr = NULL;
     struct SetMeasurepointResponseStruct *smrs_ptr = NULL;
+    struct SimpleDataSubscribeStruct *sdss_ptr = NULL;
     char *custom_ptr = NULL;
 
     switch (topic_type) {
@@ -782,6 +806,11 @@ static void *decode_msg(char *src_msg, int src_msg_len, int topic_type) {
             smrs_ptr = transform_SetMeasurepointResponsePoints_to_SetMeasurepointResponseStruct(smrps_ptr);
             setmeasurepointresponsedata__set_measurepoint_response_points__free_unpacked(smrps_ptr, NULL);
             return (void *) smrs_ptr;
+        case TOPIC_TYPE_SIMPLE_DATA_SUBSCRIBE:
+            subps_ptr = subdata__sub_points__unpack(NULL, (size_t) src_msg_len, (uint8_t *) src_msg);
+            sdss_ptr = transform_SubPoints_to_SimpleDataSubscribeStruct(subps_ptr);
+            subdata__sub_points__free_unpacked(subps_ptr, NULL);
+            return (void *) sdss_ptr;
         case TOPIC_TYPE_CUSTOM:
             custom_ptr = (char *) malloc(src_msg_len + 1);
             if (custom_ptr == NULL) {
@@ -866,6 +895,64 @@ transform_SSRecordPoints_to_DataSubscribeStruct(Ssrecorddata__SSRecordPoints *ss
     }
 
     return dss_ptr;
+}
+
+static int transform_SubPoint_to_SimpleDataSubscribeSubStruct(Subdata__SubPoint *src,
+                                                              struct SimpleDataSubscribeSubStruct *dst) {
+    if (src == NULL || dst == NULL) {
+        return 0;
+    }
+
+    dst->assetid = deep_copy_char_ptr(src->assetid);
+    dst->pointid = deep_copy_char_ptr(src->pointid);
+    dst->time = src->time;
+    dst->value = deep_copy_char_ptr(src->value);
+    dst->quality = src->quality;
+    dst->edq = src->edq;
+    dst->datatype = deep_copy_char_ptr(src->datatype);
+    dst->subdatatype = deep_copy_char_ptr(src->subdatatype);
+    dst->oemtime = src->oemtime;
+    dst->attr = deep_copy_char_ptr(src->attr);
+
+    return 0;
+}
+
+static struct SimpleDataSubscribeStruct *
+transform_SubPoints_to_SimpleDataSubscribeStruct(Subdata__SubPoints *subps) {
+    if (subps == NULL) {
+        return NULL;
+    }
+
+    struct SimpleDataSubscribeStruct *sdss_ptr = (struct SimpleDataSubscribeStruct *) malloc(
+            sizeof(struct SimpleDataSubscribeStruct));
+    if (sdss_ptr == NULL) {
+        char log_content[1024];
+        memset(log_content, 0, sizeof(log_content));
+        snprintf(log_content, sizeof(log_content), "sdss_ptr malloc error");
+        edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR, log_content);
+        return NULL;
+    }
+    memset(sdss_ptr, 0, sizeof(struct SimpleDataSubscribeStruct));
+
+    sdss_ptr->point_count = (int) (subps->n_points);
+    int size_temp = sdss_ptr->point_count * sizeof(struct SimpleDataSubscribeSubStruct);
+    sdss_ptr->points = (struct SimpleDataSubscribeSubStruct *) malloc(size_temp);
+    if (sdss_ptr->points == NULL) {
+        char log_content[1024];
+        memset(log_content, 0, sizeof(log_content));
+        snprintf(log_content, sizeof(log_content), "sdss_ptr->points malloc error");
+        edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR, log_content);
+        free(sdss_ptr);
+        return NULL;
+    }
+    memset(sdss_ptr->points, 0, size_temp);
+
+    int ii = 0;
+    for (ii = 0; ii < sdss_ptr->point_count; ii++) {
+        transform_SubPoint_to_SimpleDataSubscribeSubStruct(subps->points[ii], &(sdss_ptr->points[ii]));
+    }
+
+    return sdss_ptr;
 }
 
 static int transform_ControlResponsePoint_to_ControlResponseSubStruct(Controlresponsedata__ControlResponsePoint *src,
@@ -1098,6 +1185,63 @@ static int delete_data_subscribe_struct(struct DataSubscribeStruct *ptr) {
     if (ptr->points != NULL) {
         for (ii = 0; ii < ptr->point_count; ii++) {
             delete_data_subscribe_sub_struct(&(ptr->points[ii]));
+        }
+        free(ptr->points);
+        ptr->points = NULL;
+    }
+
+    free(ptr);
+    return 0;
+}
+
+static int delete_simple_data_subscribe_sub_struct(struct SimpleDataSubscribeSubStruct *ptr) {
+    if (ptr == NULL) {
+        return 0;
+    }
+
+    if (ptr->assetid != NULL) {
+        free(ptr->assetid);
+        ptr->assetid = NULL;
+    }
+
+    if (ptr->pointid != NULL) {
+        free(ptr->pointid);
+        ptr->pointid = NULL;
+    }
+
+    if (ptr->value != NULL) {
+        free(ptr->value);
+        ptr->value = NULL;
+    }
+
+    if (ptr->datatype != NULL) {
+        free(ptr->datatype);
+        ptr->datatype = NULL;
+    }
+
+    if (ptr->subdatatype != NULL) {
+        free(ptr->subdatatype);
+        ptr->subdatatype = NULL;
+    }
+
+    if (ptr->attr != NULL) {
+        free(ptr->attr);
+        ptr->attr = NULL;
+    }
+
+    //这里不需要再free本身，在delete_simple_data_subscribe_struct会一起释放
+    return 0;
+}
+
+static int delete_simple_data_subscribe_struct(struct SimpleDataSubscribeStruct *ptr) {
+    if (ptr == NULL) {
+        return 0;
+    }
+
+    int ii = 0;
+    if (ptr->points != NULL) {
+        for (ii = 0; ii < ptr->point_count; ii++) {
+            delete_simple_data_subscribe_sub_struct(&(ptr->points[ii]));
         }
         free(ptr->points);
         ptr->points = NULL;
@@ -1490,6 +1634,7 @@ static void *main_work_job(void *arg) {
         pthread_cleanup_push(pthread_rwlock_unlock, (void *) (&(ctx->reinit_rwlock)));
             pthread_rwlock_wrlock(&(ctx->reinit_rwlock));
             if (ctx->need_reinit == 1) {
+                edge_sleep(1000);
                 ret = ctx_reconnect(ctx);//这里面有一些系统函数默认含有取消点，需要使用pthread_cleanup_push和pthread_cleanup_pop防止死锁
                 if (ret < 0) {
                     ctx->need_reinit = 1;
@@ -1716,6 +1861,24 @@ static int ctx_deal_response_msg(struct DataServiceCtx *ctx, struct nsq_packet_h
 
             set_need_reinit_withlock(ctx, 1);
         }
+    } else if (strncmp(msg_ptr, "{", 1) == 0) {
+        //auth成功反较
+        int status = get_nsq_init_status_withlock(ctx);
+        if (status == NSQ_INIT_STATUS_WAIT_AUTH_RESPONSE) {
+            set_nsq_init_status_withlock(ctx, NSQ_INIT_STATUS_AUTH_SUCCESS);
+            char log_content[1024];
+            memset(log_content, 0, sizeof(log_content));
+            snprintf(log_content, sizeof(log_content),
+                     "recv response=%s, previous status=NSQ_INIT_STATUS_WAIT_AUTH_RESPONSE, change to NSQ_INIT_STATUS_AUTH_SUCCESS",
+                     msg_ptr);
+            edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO,
+                           log_content);
+        } else {
+            char log_content[1024];
+            memset(log_content, 0, sizeof(log_content));
+            snprintf(log_content, sizeof(log_content), "unknown msg=%s", msg_ptr);
+            edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO, log_content);
+        }
     } else {
         char log_content[1024];
         memset(log_content, 0, sizeof(log_content));
@@ -1743,6 +1906,16 @@ static int ctx_deal_error_msg(struct DataServiceCtx *ctx, struct nsq_packet_head
         memset(log_content, 0, sizeof(log_content));
         snprintf(log_content, sizeof(log_content),
                  "recv error msg=%s, previous status=NSQ_INIT_STATUS_WAIT_SUB_RESPONSE, need reconnect",
+                 msg_ptr);
+        edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO,
+                       log_content);
+
+        set_need_reinit_withlock(ctx, 1);
+    } else if (status == NSQ_INIT_STATUS_WAIT_AUTH_RESPONSE) {
+        char log_content[1024];
+        memset(log_content, 0, sizeof(log_content));
+        snprintf(log_content, sizeof(log_content),
+                 "recv error msg=%s, auth failed, need reconnect",
                  msg_ptr);
         edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO,
                        log_content);
@@ -1846,6 +2019,16 @@ static int ctx_deal_message_msg(struct DataServiceCtx *ctx, struct nsq_packet_he
 
 //期望接收一帧nsq的OK反较
 static int expect_recv_ok_frame(int sock, int timeout_ms) {
+    return expect_recv_specified_frame(sock, "OK", 2, timeout_ms);
+}
+
+//期望接收一帧nsq的auth正确反较
+static int expect_recv_auth_ok_frame(int sock, int timeout_ms) {
+    return expect_recv_specified_frame(sock, "{", 1, timeout_ms);
+}
+
+//期望接收一帧nsq的指定反较
+static int expect_recv_specified_frame(int sock, char *expect_in, int expect_in_len, int timeout_ms) {
     if (sock < 0) {
         char log_content[1024];
         memset(log_content, 0, sizeof(log_content));
@@ -1868,7 +2051,7 @@ static int expect_recv_ok_frame(int sock, int timeout_ms) {
     memset((void *) fd_array, 0, sizeof(fd_array));
     char small_recv_buf[128];
     memset((void *) small_recv_buf, 0, sizeof(small_recv_buf));
-    char big_recv_buf[1024];
+    char big_recv_buf[2048];
     memset((void *) big_recv_buf, 0, sizeof(big_recv_buf));
     int has_recv_bytes = 0;//已经接收到的字节数
     int should_recv_bytes = -1;//还需要接收的字节数
@@ -1970,13 +2153,13 @@ static int expect_recv_ok_frame(int sock, int timeout_ms) {
                 content_ptr = big_recv_buf + sizeof(struct nsq_packet_header);
                 switch (nsq_packet_header_local.frame_type) {
                     case NSQ_FRAME_TYPE_RESPONSE://命令反较，心跳等
-                        if (strncmp(content_ptr, "OK", 2) == 0) {
+                        if (strncmp(content_ptr, expect_in, expect_in_len) == 0) {
                             return 0;
                         } else {
                             memset(log_content, 0, sizeof(log_content));
                             snprintf(log_content, sizeof(log_content),
-                                     "expect OK, but recv response message(%s), maybe something error, need reconnect",
-                                     content_ptr);
+                                     "expect %s, but recv response message(%s), maybe something error, need reconnect",
+                                     expect_in, content_ptr);
                             edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR,
                                            log_content);
                             return -1;
@@ -1985,8 +2168,8 @@ static int expect_recv_ok_frame(int sock, int timeout_ms) {
                     case NSQ_FRAME_TYPE_ERROR://错误返回
                         memset(log_content, 0, sizeof(log_content));
                         snprintf(log_content, sizeof(log_content),
-                                 "expect OK, but recv error message(%s), maybe something error, need reconnect",
-                                 content_ptr);
+                                 "expect %s, but recv error message(%s), maybe something error, need reconnect",
+                                 expect_in, content_ptr);
                         edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR,
                                        log_content);
                         return -1;
@@ -1994,7 +2177,8 @@ static int expect_recv_ok_frame(int sock, int timeout_ms) {
                     case NSQ_FRAME_TYPE_MESSAGE://消息
                         memset(log_content, 0, sizeof(log_content));
                         snprintf(log_content, sizeof(log_content),
-                                 "expect OK, but recv subscribe message, maybe something error, need reconnect");
+                                 "expect %s, but recv subscribe message, maybe something error, need reconnect",
+                                 expect_in);
                         edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR,
                                        log_content);
                         return -1;
@@ -2002,7 +2186,8 @@ static int expect_recv_ok_frame(int sock, int timeout_ms) {
                     default:
                         memset(log_content, 0, sizeof(log_content));
                         snprintf(log_content, sizeof(log_content),
-                                 "expect OK, but recv unknown message, maybe something error, need reconnect");
+                                 "expect %s, but recv unknown message, maybe something error, need reconnect",
+                                 expect_in);
                         edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR,
                                        log_content);
                         return -1;
@@ -2117,6 +2302,7 @@ static int ctx_connect_and_send_magic(struct DataServiceCtx *ctx) {
         return -1;
     }
 
+    //关闭心跳
     ret = ctx_close_heartbeat(sock_fd);
     if (ret >= 0) {
         ret = expect_recv_ok_frame(sock_fd, 10000);
@@ -2129,6 +2315,23 @@ static int ctx_connect_and_send_magic(struct DataServiceCtx *ctx) {
         edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_WARN, log_content);
         close(sock_fd);
         return -1;
+    }
+
+    //发送auth
+    if (strlen(ctx->p) > 0) {
+        ret = ctx_send_auth(sock_fd, ctx->p);
+        if (ret >= 0) {
+            ret = expect_recv_auth_ok_frame(sock_fd, 10000);
+        }
+        if (ret < 0) {
+            char log_content[1024];
+            memset(log_content, 0, sizeof(log_content));
+            snprintf(log_content, sizeof(log_content),
+                     "ctx_send_auth error while ctx_connect_and_send_magic, ip=%s, port=%d", ip_used, ctx->port);
+            edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_WARN, log_content);
+            close(sock_fd);
+            return -1;
+        }
     }
 
     set_tcp_sock_fd_withlock(ctx, sock_fd);
@@ -2179,6 +2382,63 @@ static int ctx_init_nsq(struct DataServiceCtx *ctx) {
                 return ret;
             }
 
+
+            if (strlen(ctx->p) > 0) {
+                //发送auth信息
+                ret = ctx_send_auth(ctx->tcp_sock_fd, ctx->p);
+                if (ret < 0) {
+                    memset(log_content, 0, sizeof(log_content));
+                    snprintf(log_content, sizeof(log_content), "ctx_send_auth error");
+                    edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR, log_content);
+                    return ret;
+                }
+                ctx->nsq_init_status = NSQ_INIT_STATUS_WAIT_AUTH_RESPONSE;
+                memset(log_content, 0, sizeof(log_content));
+                snprintf(log_content, sizeof(log_content),
+                         "after sent magic and auth info, previous status=NSQ_INIT_STATUS_NOTHING, change to NSQ_INIT_STATUS_WAIT_AUTH_RESPONSE");
+                edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO,
+                               log_content);
+            } else {
+                if (ctx->ctx_type == CTX_TYPE_ONLY_CONSUMER) {
+                    //发送订阅消息
+                    ret = ctx_send_subscribe_info(ctx->tcp_sock_fd, ctx->topic, ctx->channel);
+                    if (ret < 0) {
+                        memset(log_content, 0, sizeof(log_content));
+                        snprintf(log_content, sizeof(log_content),
+                                 "ctx_send_subscribe_info error, topic=%s, channel=%s",
+                                 ctx->topic, ctx->channel);
+                        edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR, log_content);
+                        return ret;
+                    }
+                    ctx->nsq_init_status = NSQ_INIT_STATUS_WAIT_SUB_RESPONSE;
+                    memset(log_content, 0, sizeof(log_content));
+                    snprintf(log_content, sizeof(log_content),
+                             "after sent magic and subscribe_info, previous status=NSQ_INIT_STATUS_NOTHING, change to NSQ_INIT_STATUS_WAIT_SUB_RESPONSE");
+                    edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO,
+                                   log_content);
+                } else {
+                    ctx->nsq_init_status = NSQ_INIT_STATUS_INIT_SUCCESS;
+                    memset(log_content, 0, sizeof(log_content));
+                    snprintf(log_content, sizeof(log_content),
+                             "after sent magic, previous status=NSQ_INIT_STATUS_NOTHING, change to NSQ_INIT_STATUS_INIT_SUCCESS");
+                    edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO,
+                                   log_content);
+                    if (ctx->connect_callback != NULL) {
+                        ctx->connect_callback(NULL, ctx->channel_id, ctx->user_ctx);
+                    }
+                }
+            }
+            break;
+        case NSQ_INIT_STATUS_WAIT_AUTH_RESPONSE:
+            gettimeofday(&time_current, NULL);
+            if (time_current.tv_sec - ctx->nsq_init_start_ts.tv_sec > EDGE_DATASERVICE_COMMAND_RECV_TIMEOUT) {
+                memset(log_content, 0, sizeof(log_content));
+                snprintf(log_content, sizeof(log_content), "nsq init timeout(wait auth response)");
+                edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR, log_content);
+                return -1;
+            };
+            break;
+        case NSQ_INIT_STATUS_AUTH_SUCCESS:
             if (ctx->ctx_type == CTX_TYPE_ONLY_CONSUMER) {
                 //发送订阅消息
                 ret = ctx_send_subscribe_info(ctx->tcp_sock_fd, ctx->topic, ctx->channel);
@@ -2193,28 +2453,26 @@ static int ctx_init_nsq(struct DataServiceCtx *ctx) {
                 ctx->nsq_init_status = NSQ_INIT_STATUS_WAIT_SUB_RESPONSE;
                 memset(log_content, 0, sizeof(log_content));
                 snprintf(log_content, sizeof(log_content),
-                         "after sent magic and subscribe_info, previous status=NSQ_INIT_STATUS_NOTHING, change to NSQ_INIT_STATUS_WAIT_SUB_RESPONSE");
+                         "after sent magic and auth and subscribe_info, previous status=NSQ_INIT_STATUS_AUTH_SUCCESS, change to NSQ_INIT_STATUS_WAIT_SUB_RESPONSE");
                 edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO,
                                log_content);
-//                set_nsq_init_status_withlock(ctx, NSQ_INIT_STATUS_WAIT_SUB_RESPONSE);
             } else {
                 ctx->nsq_init_status = NSQ_INIT_STATUS_INIT_SUCCESS;
                 memset(log_content, 0, sizeof(log_content));
                 snprintf(log_content, sizeof(log_content),
-                         "after sent magic, previous status=NSQ_INIT_STATUS_NOTHING, change to NSQ_INIT_STATUS_INIT_SUCCESS");
+                         "after sent magic and auth, previous status=NSQ_INIT_STATUS_AUTH_SUCCESS, change to NSQ_INIT_STATUS_INIT_SUCCESS");
                 edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_INFO,
                                log_content);
                 if (ctx->connect_callback != NULL) {
                     ctx->connect_callback(NULL, ctx->channel_id, ctx->user_ctx);
                 }
-//                set_nsq_init_status_withlock(ctx, NSQ_INIT_STATUS_INIT_SUCCESS);
             }
             break;
         case NSQ_INIT_STATUS_WAIT_SUB_RESPONSE:
             gettimeofday(&time_current, NULL);
             if (time_current.tv_sec - ctx->nsq_init_start_ts.tv_sec > EDGE_DATASERVICE_COMMAND_RECV_TIMEOUT) {
                 memset(log_content, 0, sizeof(log_content));
-                snprintf(log_content, sizeof(log_content), "nsq init timeout");
+                snprintf(log_content, sizeof(log_content), "nsq init timeout(wait sub response)");
                 edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR, log_content);
                 return -1;
             };
@@ -2449,6 +2707,49 @@ static int ctx_send_magic(int sock) {
     memset(send_buf, 0, sizeof(send_buf));
     snprintf(send_buf, sizeof(send_buf), "  V2");
     int send_len = strlen(send_buf);
+
+    int ret = 0;
+    ret = ctx_tcp_send_data(sock, send_buf, send_len);
+    if (ret < 0) {
+        char log_content[1024];
+        memset(log_content, 0, sizeof(log_content));
+        snprintf(log_content, sizeof(log_content), "ctx_tcp_send_data error, send_buf=%s", send_buf);
+        edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR,
+                       log_content);
+        return ret;
+    }
+    return 0;
+}
+
+//发送auth信息
+static int ctx_send_auth(int sock, char *p) {
+    if (p == NULL) {
+        return 0;
+    }
+
+    char *prefix = "AUTH\n";
+    char send_buf[1024];
+    memset(send_buf, 0, sizeof(send_buf));
+    int str_len = strlen(p);
+    int str_len_net = MY_htonl(str_len);
+    int send_len = str_len + strlen(prefix) + 4;
+
+    if (send_len > sizeof(send_buf)) {
+        char log_content[1024];
+        memset(log_content, 0, sizeof(log_content));
+        snprintf(log_content, sizeof(log_content), "strlen(p)=%d is too long", str_len);
+        edge_log_print(__FILE__, __FUNCTION__, EDGE_MODULE_NAME, __LINE__, EDGE_LOG_ERROR,
+                       log_content);
+        return -1;
+    }
+
+    char *ptr_temp = send_buf;
+    memcpy(ptr_temp, prefix, strlen(prefix));
+    ptr_temp += strlen(prefix);
+    memcpy(ptr_temp, (void *) &str_len_net, 4);
+    ptr_temp += 4;
+    memcpy(ptr_temp, p, str_len);
+    ptr_temp += str_len;
 
     int ret = 0;
     ret = ctx_tcp_send_data(sock, send_buf, send_len);
@@ -2713,6 +3014,17 @@ new_data_service_ctx(struct IPBox *ip_list, int port, char *accessKey, char *sec
                      void (*close_callback)(void *work_ctx, char *channel_id, void *user_ctx),
                      void (*msg_callback)(void *work_ctx, char *channel_id, struct DataServiceMessage *msg,
                                           void *user_ctx)) {
+    return new_data_service_ctx_en(ip_list, port, NULL, accessKey, secretKey, channel_id, consumerGroup, topic_type,
+                                   need_auto_reconnect, user_ctx, connect_callback, close_callback, msg_callback);
+}
+
+extern struct DataServiceCtx *
+new_data_service_ctx_en(struct IPBox *ip_list, int port, char *p, char *accessKey, char *secretKey, char *channel_id,
+                        char *consumerGroup, int topic_type, int need_auto_reconnect, void *user_ctx,
+                        void (*connect_callback)(void *work_ctx, char *channel_id, void *user_ctx),
+                        void (*close_callback)(void *work_ctx, char *channel_id, void *user_ctx),
+                        void (*msg_callback)(void *work_ctx, char *channel_id, struct DataServiceMessage *msg,
+                                             void *user_ctx)) {
     signal(SIGPIPE, SIG_IGN);
 
     if (edge_current_log_config == NULL) {
@@ -2787,6 +3099,11 @@ new_data_service_ctx(struct IPBox *ip_list, int port, char *accessKey, char *sec
     }
 
     ctx->port = port;
+    if (p == NULL) {
+        memset(ctx->p, 0, sizeof(ctx->p));
+    } else {
+        snprintf(ctx->p, sizeof(ctx->p), "%s", p);
+    }
     snprintf(ctx->accessKey, sizeof(ctx->accessKey), "%s", accessKey);
     snprintf(ctx->secretKey, sizeof(ctx->secretKey), "%s", secretKey);
     if (consumerGroup == NULL) {
@@ -2840,7 +3157,8 @@ new_data_service_ctx(struct IPBox *ip_list, int port, char *accessKey, char *sec
     }
 
     //获取主机IP
-    struct IPBox *master_ip_box = get_current_master_ip_list(ctx->ip_box, ctx->ha_port);
+    struct IPBox *master_ip_box = get_current_master_ip_list_timeout(ctx->ip_box, ctx->ha_port,
+                                                                     EDGE_CURL_INIT_TIMEOUT_SEC);
     if (master_ip_box == NULL) {
         ctx->ip_box_used = deep_copy_ip_box(ctx->ip_box);
     } else {
@@ -2856,6 +3174,15 @@ new_data_service_ctx_for_publish(struct IPBox *ip_list, int port, char *accessKe
                                  int need_auto_reconnect, int is_fast, void *user_ctx,
                                  void (*connect_callback)(void *work_ctx, char *channel_id, void *user_ctx),
                                  void (*close_callback)(void *work_ctx, char *channel_id, void *user_ctx)) {
+    return new_data_service_ctx_en_for_publish(ip_list, port, NULL, accessKey, secretKey, need_auto_reconnect, is_fast,
+                                               user_ctx, connect_callback, close_callback);
+}
+
+extern struct DataServiceCtx *
+new_data_service_ctx_en_for_publish(struct IPBox *ip_list, int port, char *p, char *accessKey, char *secretKey,
+                                    int need_auto_reconnect, int is_fast, void *user_ctx,
+                                    void (*connect_callback)(void *work_ctx, char *channel_id, void *user_ctx),
+                                    void (*close_callback)(void *work_ctx, char *channel_id, void *user_ctx)) {
     signal(SIGPIPE, SIG_IGN);
 
     if (edge_current_log_config == NULL) {
@@ -2909,6 +3236,11 @@ new_data_service_ctx_for_publish(struct IPBox *ip_list, int port, char *accessKe
     }
 
     ctx->port = port;
+    if (p == NULL) {
+        memset(ctx->p, 0, sizeof(ctx->p));
+    } else {
+        snprintf(ctx->p, sizeof(ctx->p), "%s", p);
+    }
     snprintf(ctx->accessKey, sizeof(ctx->accessKey), "%s", accessKey);
     snprintf(ctx->secretKey, sizeof(ctx->secretKey), "%s", secretKey);
 
@@ -2926,7 +3258,8 @@ new_data_service_ctx_for_publish(struct IPBox *ip_list, int port, char *accessKe
     }
 
     //获取主机IP
-    struct IPBox *master_ip_box = get_current_master_ip_list(ctx->ip_box, ctx->ha_port);
+    struct IPBox *master_ip_box = get_current_master_ip_list_timeout(ctx->ip_box, ctx->ha_port,
+                                                                     EDGE_CURL_INIT_TIMEOUT_SEC);
     if (master_ip_box == NULL) {
         ctx->ip_box_used = deep_copy_ip_box(ctx->ip_box);
     } else {
@@ -3030,7 +3363,7 @@ extern int data_service_ctx_start(struct DataServiceCtx *ctx) {
     set_need_reinit_withlock(ctx, 0);
 
     //tcp连接
-    int sock_fd = connect_server(ip_used, (unsigned short) (ctx->port));
+    int sock_fd = connect_server_timeout(ip_used, (unsigned short) (ctx->port), EDGE_DATASERVICE_TCP_CONNECT_INIT_TIMEOUT_MS);
     if (sock_fd < 0) {
         char log_content[1024];
         memset(log_content, 0, sizeof(log_content));
@@ -3160,6 +3493,7 @@ extern int delete_data_service_msg(struct DataServiceMessage *data_service_msg) 
     struct DataSubscribeStruct *dss_ptr = NULL;
     struct ControlResponseStruct *crs_ptr = NULL;
     struct SetMeasurepointResponseStruct *smrs_ptr = NULL;
+    struct SimpleDataSubscribeStruct *sdss_ptr = NULL;
     char log_content[1024];
 
     if (data_service_msg->msg != NULL) {
@@ -3176,6 +3510,10 @@ extern int delete_data_service_msg(struct DataServiceMessage *data_service_msg) 
             case TOPIC_TYPE_SET_MEASUREPOINT_RESPONSE:
                 smrs_ptr = (struct SetMeasurepointResponseStruct *) (data_service_msg->msg);
                 delete_set_measurepoint_response_struct(smrs_ptr);
+                break;
+            case TOPIC_TYPE_SIMPLE_DATA_SUBSCRIBE:
+                sdss_ptr = (struct SimpleDataSubscribeStruct *) (data_service_msg->msg);
+                delete_simple_data_subscribe_struct(sdss_ptr);
                 break;
             case TOPIC_TYPE_CUSTOM:
                 free(data_service_msg->msg);

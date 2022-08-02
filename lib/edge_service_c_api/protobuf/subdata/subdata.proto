@@ -1,0 +1,28 @@
+syntax = "proto2";
+package subdata;
+
+option java_package = "com.protobuf.generated";
+option java_outer_classname = "SubData";
+option java_multiple_files = false;
+
+message SubPoint
+{
+  optional string assetId = 1;
+  optional string pointId = 2;
+  optional int64 time = 3;
+  optional string value = 4;
+  optional int32 quality = 5;
+  optional int32 edq = 6;
+  optional string dataType = 7;
+  optional string subDataType = 8;
+  optional int64 oemTime = 9;
+  optional string attr = 10;
+  optional string spanId= 11;
+  optional string traceId= 12;
+  optional bool sendremote= 13;
+}
+
+message SubPoints
+{
+  repeated SubPoint points = 1;
+}

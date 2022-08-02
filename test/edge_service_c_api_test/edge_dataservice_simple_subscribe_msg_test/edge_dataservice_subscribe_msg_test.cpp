@@ -21,20 +21,29 @@ void my_log_writer(struct LogInfoBox *log_info, void *user_ctx) {
     delete_log_info_box(log_info);
 }
 
-void print_custom_msg(char *custom_ptr, int len) {
+void print_simple_data_subscribe_msg(struct SimpleDataSubscribeStruct *sdss_ptr) {
     printf("---------------------->\n");
-    if (custom_ptr == NULL) {
-        printf("custom_ptr == NULL\n");
+    if (sdss_ptr == NULL) {
+        printf("sdss_ptr == NULL\n");
         return;
     }
-
+    printf("sdss_ptr->point_count=%d\n", sdss_ptr->point_count);
     int ii = 0;
-    printf("hex:");
-    for (ii = 0; ii < len; ii++) {
-        printf("%hhx ", custom_ptr[ii]);
+    for (ii = 0; ii < sdss_ptr->point_count; ii++) {
+        printf("*******>\n");
+        printf("sdss_ptr->points[%d].assetid=%s\n", ii, sdss_ptr->points[ii].assetid);
+        printf("sdss_ptr->points[%d].pointid=%s\n", ii, sdss_ptr->points[ii].pointid);
+        printf("sdss_ptr->points[%d].time=%lld\n", ii, (long long int) (sdss_ptr->points[ii].time));
+        printf("sdss_ptr->points[%d].value=%s\n", ii, sdss_ptr->points[ii].value);
+        printf("sdss_ptr->points[%d].quality=%d\n", ii, sdss_ptr->points[ii].quality);
+        printf("sdss_ptr->points[%d].edq=%d\n", ii, sdss_ptr->points[ii].edq);
+        printf("sdss_ptr->points[%d].datatype=%s\n", ii, sdss_ptr->points[ii].datatype);
+        printf("sdss_ptr->points[%d].subdatatype=%s\n", ii, sdss_ptr->points[ii].subdatatype);
+        printf("sdss_ptr->points[%d].oemtime=%lld\n", ii, (long long int) (sdss_ptr->points[ii].oemtime));
+        printf("sdss_ptr->points[%d].attr=%s\n", ii, sdss_ptr->points[ii].attr);
+        printf("<*******\n");
     }
-    printf("\n");
-    printf("str:%s\n", custom_ptr);
+
     printf("<----------------------\n\n");
 }
 
@@ -79,8 +88,8 @@ msg_callback(void *work_ctx, char *channel_id, struct DataServiceMessage *msg, v
            msg->topic_type, __FILE__, __FUNCTION__, __LINE__);
 
     switch (msg->topic_type) {
-        case TOPIC_TYPE_CUSTOM:
-            print_custom_msg((char *) (msg->msg), msg->msg_len);
+        case TOPIC_TYPE_SIMPLE_DATA_SUBSCRIBE:
+            print_simple_data_subscribe_msg((struct SimpleDataSubscribeStruct *) (msg->msg));
             break;
         default:
             printf("[DATASERVICE]:unsupported msg->topic_type=%d(file=%s, function=%s, line=%d)\n",
@@ -116,15 +125,15 @@ int main(int argc, char *argv[]) {
 
     //需要连接的ip
     ip_list = add_ip_to_ip_box(ip_list, "127.0.0.1");
-    //订阅的topic类型，实时数据订阅可以选TOPIC_TYPE_CUSTOM或TOPIC_TYPE_AUTO，custom类型不会解析订阅到的数据，会原样返回给调用方
-    int topic_type = TOPIC_TYPE_CUSTOM;
+    //订阅的topic类型，实时数据订阅可以选TOPIC_TYPE_DATA_SUBSCRIBE或TOPIC_TYPE_AUTO
+    int topic_type = TOPIC_TYPE_SIMPLE_DATA_SUBSCRIBE;
     //端口
     int port = EDGE_DATASERVICE_DEFAULT_PORT;
     //登录密码，不需要登录密码时，可以是NULL或空串
     snprintf(p, sizeof(p), "%s", "123456");
-    //topic名字，custom订阅方式时，可以订阅任意topic，包括实时数据、控制反较、写值反较、其他数据
-    snprintf(topic_name, sizeof(topic_name), "%s", "custom_topic");
-    //consumerGroup，非必填，如果consumerGroup是NULL，则默认为default，详细说明参考new_data_service_ctx函数注释
+    //topic名字，实时数据订阅的topic都是以DATASVC.SUB.开头
+    snprintf(topic_name, sizeof(topic_name), "%s", "DATASVC.SUB.APP.SUBTEST");
+    //consumerGroup，非必填，如果consumerGroup是NULL，则默认为default，详细说明参考new_data_service_ctx_en函数注释
     snprintf(consumerGroup, sizeof(consumerGroup), "%s", "default");
 
     struct DataServiceCtx *ctx = NULL;
